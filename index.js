@@ -7,10 +7,9 @@ import path from "path";
 import fs from "fs-extra";
 import mongoose from "mongoose";
 
-
-
-const PORT = process.env.PORT || 4000;
+const PORT = Number(process.env.PORT) || 4000;       // ✅ sane default
 const UPLOADS_DIR = path.join(process.cwd(), "uploads");
+const PUBLIC_DIR = path.join(process.cwd(), "public"); // optional if you have a frontend
 
 await fs.ensureDir(UPLOADS_DIR);
 
@@ -44,7 +43,10 @@ app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "10mb" }));
 app.use("/uploads", express.static(UPLOADS_DIR));
 
-app.get("/", (req, res) => {
+// (optional) serve your frontend from /public
+app.use(express.static(PUBLIC_DIR));
+
+app.get("/", (_req, res) => {
   res.send("FixMyRoad API is running");
 });
 
@@ -62,7 +64,7 @@ const upload = multer({
 
 const nowISO = () => new Date().toISOString();
 
-app.get("/health", (_, res) => res.json({ ok: true, time: nowISO() }));
+app.get("/health", (_req, res) => res.json({ ok: true, time: nowISO() }));
 
 app.post("/reports", upload.single("image"), async (req, res) => {
   try {
@@ -84,6 +86,7 @@ app.post("/reports", upload.single("image"), async (req, res) => {
 
     res.status(201).json({ ok: true, report: doc });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "internal" });
   }
 });
@@ -100,6 +103,7 @@ app.get("/reports", async (req, res) => {
       .lean();
     res.json({ ok: true, total, page: p, limit: l, reports });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "internal" });
   }
 });
@@ -122,6 +126,7 @@ app.put("/reports/:id", async (req, res) => {
     await r.save();
     res.json({ ok: true, report: r });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "internal" });
   }
 });
@@ -132,11 +137,13 @@ app.delete("/reports/:id", async (req, res) => {
     if (!r) return res.status(404).json({ error: "not_found" });
 
     if (r.image) {
-      const imgPath = path.join(process.cwd(), r.image);
+      // ✅ delete from uploads safely regardless of leading slash
+      const imgPath = path.join(UPLOADS_DIR, path.basename(r.image));
       await fs.remove(imgPath).catch(() => {});
     }
     res.json({ ok: true });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "internal" });
   }
 });
@@ -157,11 +164,12 @@ app.get("/near", async (req, res) => {
 
     res.json({ ok: true, total: docs.length, reports: docs });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "internal" });
   }
 });
 
-app.get("/stats", async (_, res) => {
+app.get("/stats", async (_req, res) => {
   const [total, open, inProgress, fixed] = await Promise.all([
     Report.countDocuments(),
     Report.countDocuments({ status: "open" }),
@@ -171,4 +179,24 @@ app.get("/stats", async (_, res) => {
   res.json({ ok: true, total, open, inProgress, fixed });
 });
 
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+// ✅ robust server start with fallback if port is busy
+function start(port) {
+  const server = app.listen(port, () => {
+    const addr = server.address();
+    const actualPort = typeof addr === "object" && addr ? addr.port : port;
+    console.log(`Server running on http://localhost:${actualPort}`);
+  });
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.warn(`Port ${port} in use, trying ${port + 1}...`);
+      start(port + 1);
+    } else if (err.code === "EACCES") {
+      console.warn(`No permission on port ${port}, trying ${port + 1}...`);
+      start(port + 1);
+    } else {
+      console.error(err);
+      process.exit(1);
+    }
+  });
+}
+start(PORT);
